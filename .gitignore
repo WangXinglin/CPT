@@ -1,0 +1,36 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+env/
+.conda/
+
+# Experiment outputs and logs
+outputs/
+output/
+logs/
+*.log
+*.out
+*.err
+*.pkl
+
+# Large model/checkpoint artifacts
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+checkpoints/
+models/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
