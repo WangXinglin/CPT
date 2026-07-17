@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Calculate FLOPs for LeaP output JSON files.
+Calculate Qwen/Qwen3 FLOPs for LeaP output JSON files.
 
 LeaP saves the final prompt text after several generate() calls have been
 spliced together. This script reconstructs those calls from the visible
@@ -8,6 +8,9 @@ spliced together. This script reconstructs those calls from the visible
 uses the shared CPT Qwen3 FLOPs formula. By default it uses an
 idealized incremental KV-cache accounting mode; --cache-mode recompute restores
 the full-prefill-per-generate accounting.
+
+This implementation is specific to Qwen-family model configurations and must
+not be used for GPT-OSS or unrelated model architectures.
 """
 
 import argparse
@@ -22,9 +25,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-CPT_EVAL_DIR = Path(__file__).resolve().parents[2] / "CPT" / "eval"
-if str(CPT_EVAL_DIR) not in sys.path:
-    sys.path.insert(0, str(CPT_EVAL_DIR))
+FLOPS_DIR = Path(__file__).resolve().parent
+if str(FLOPS_DIR) not in sys.path:
+    sys.path.insert(0, str(FLOPS_DIR))
 
 from calculate_cpt_math_flops import (
     bucket_to_report,
@@ -1596,7 +1599,9 @@ def run_batch_mode(args: argparse.Namespace, model: Any) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Calculate FLOPs for LeaP output JSON files.")
+    parser = argparse.ArgumentParser(
+        description="Calculate Qwen/Qwen3 FLOPs for LeaP output JSON files."
+    )
     parser.add_argument("--results-dir", default=None, help="LeaP output directory or one JSON file.")
     parser.add_argument(
         "--output-root",

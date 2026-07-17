@@ -1,5 +1,7 @@
+# Shared dependencies for CPT and SC.
+# Install requirements-qwen.txt or requirements-gpt-oss.txt instead of this
+# file directly so that the correct vLLM version is selected.
 sentence-transformers
-transformers==4.57.6
+transformers
 tqdm
 torch
-vllm

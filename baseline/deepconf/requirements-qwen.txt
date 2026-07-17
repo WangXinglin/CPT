@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# DeepConf with Qwen
+vllm==0.10.2

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Self-Consistency (SC) Accuracy 
+Evaluate Math self-consistency (SC) results.
 
-：
-1. ： samples  rollouts， True/False （）
-2. ： sample， rollouts  majority voting
-3. 
+The evaluator:
+1. Parses and grades every rollout independently.
+2. Samples up to k answers and applies plurality voting per problem.
+3. Reports accuracy over the problems that were loaded successfully.
 """
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -22,7 +22,7 @@ from tqdm import tqdm
 from collections import Counter
 from functools import wraps
 
-# 
+# Local answer-extraction and symbolic-grading utilities.
 from sal.utils.math import extract_answer
 from evaluation.grader import math_equal
 
@@ -41,8 +41,8 @@ except ImportError:
 
 # ================= Global Variables for Workers =================
 _global_tokenizer = None
-_global_token_limit = 40000
-_global_timeout = 120  # （）
+_global_token_limit = 60000
+_global_timeout = 120  # seconds
 
 # ================= Timeout Mechanism =================
 
@@ -54,8 +54,8 @@ def timeout_handler(signum, frame):
 
 def run_with_timeout(func, args=(), kwargs=None, timeout_sec=600):
     """
-    ，
-     multiprocessing.Process + Queue 
+    Run a function in a child process and enforce a wall-clock timeout.
+    The child reports its result through a multiprocessing queue.
     """
     if kwargs is None:
         kwargs = {}
@@ -73,7 +73,7 @@ def run_with_timeout(func, args=(), kwargs=None, timeout_sec=600):
     process.join(timeout=timeout_sec)
     
     if process.is_alive():
-        # ，
+        # Terminate the worker when the comparison exceeds the time limit.
         process.terminate()
         process.join(timeout=1)
         if process.is_alive():
@@ -91,7 +91,7 @@ def run_with_timeout(func, args=(), kwargs=None, timeout_sec=600):
     return None, False
 
 def init_worker(tokenizer_path: str, timeout: int):
-    """： worker  tokenizer"""
+    """Initialize each process-pool worker and its optional tokenizer."""
     global _global_tokenizer, _global_timeout
     
     _global_timeout = timeout
@@ -110,16 +110,16 @@ def init_worker(tokenizer_path: str, timeout: int):
 # ================= Helper Functions =================
 
 def is_numeric_filename(file_path: Path) -> bool:
-    """（）"""
+    """Return whether the file stem is a numeric sample index."""
     return file_path.stem.isdigit()
 
 def _do_math_equal(extracted: str, ground_truth: str) -> bool:
-    """ math_equal """
+    """Compare two math answers without the evaluator's nested timeout."""
     return math_equal(extracted, ground_truth, timeout=False)
 
 def process_single_rollout(args) -> Tuple[int, int, str, bool]:
     """
-     rollout：（）
+    Evaluate one rollout and return its parsed answer and correctness.
     
     Args:
         args: (sample_index, rollout_index, raw_text, ground_truth)
@@ -131,35 +131,35 @@ def process_single_rollout(args) -> Tuple[int, int, str, bool]:
     
     global _global_tokenizer, _global_token_limit, _global_timeout
     
-    # 
+    # Empty responses are always invalid.
     if raw_text is None or str(raw_text).strip() == "":
         return (sample_idx, rollout_idx, "[INVALID_NULL]", False)
     
     text_str = str(raw_text)
     
-    # Token 
+    # Enforce the token limit when a tokenizer is available.
     if _global_tokenizer is not None:
         try:
             if len(_global_tokenizer.encode(text_str)) > _global_token_limit:
                 return (sample_idx, rollout_idx, "[INVALID_LENGTH]", False)
-        except:
+        except Exception:
             return (sample_idx, rollout_idx, "[INVALID_TOKENIZER]", False)
     
-    # 
+    # Extract the final math answer.
     try:
         pred_ans = extract_answer(text_str, data_name="math")
         if pred_ans is None:
             return (sample_idx, rollout_idx, "[INVALID_PARSE]", False)
         extracted = str(pred_ans)
-    except:
+    except Exception:
         return (sample_idx, rollout_idx, "[INVALID_PARSE]", False)
     
-    # （）
+    # Reject parser sentinel values explicitly.
     invalid_markers = {"[INVALID_NULL]", "[INVALID_PARSE]", "[INVALID_LENGTH]", "[INVALID_TOKENIZER]"}
     if extracted in invalid_markers:
         return (sample_idx, rollout_idx, extracted, False)
     
-    #  math_equal，
+    # Run symbolic equivalence checking in a separate process.
     try:
         result, is_timeout = run_with_timeout(
             _do_math_equal, 
@@ -167,9 +167,9 @@ def process_single_rollout(args) -> Tuple[int, int, str, bool]:
             timeout_sec=_global_timeout
         )
         if is_timeout:
-            return (sample_idx, rollout_idx, extracted, False)  # 
+            return (sample_idx, rollout_idx, extracted, False)
         is_correct = result if result is not None else False
-    except:
+    except Exception:
         is_correct = False
     
     return (sample_idx, rollout_idx, extracted, is_correct)
@@ -178,7 +178,7 @@ def process_single_rollout(args) -> Tuple[int, int, str, bool]:
 
 def process_rollout_batch(batch_args) -> List[Tuple[int, int, str, bool]]:
     """
-     rollouts（）
+    Evaluate a batch of rollouts inside one process-pool worker.
     """
     results = []
     for args in batch_args:
@@ -190,34 +190,34 @@ def process_rollout_batch(batch_args) -> List[Tuple[int, int, str, bool]]:
 
 def load_and_calculate(data_dir: str, tokenizer_path: str, n_groups: int, max_reference: int, timeout_per_rollout: int = 600) -> Dict[int, Dict]:
     """
-    ：
-    - ： rollouts，
-    - ： sample， majority voting
+    Load numeric per-question results and calculate SC accuracy.
+    Rollouts are graded in parallel, then each problem is evaluated with
+    repeated answer-vote sampling.
     """
     path = Path(data_dir)
     all_files = sorted([f for f in path.glob("*.json") if not f.name.startswith('.')])
     
-    # ：
+    # Keep only numeric files; other JSON reports in the directory are ignored.
     files = [f for f in all_files if is_numeric_filename(f)]
     skipped_count = len(all_files) - len(files)
     
     if not files:
-        print(f"❌  {data_dir}  JSON （）")
+        print(f"Error: no numeric-named JSON files found in {data_dir}.")
         return {}
 
-    print(f"📂  {len(all_files)} ， {len(files)} （ {skipped_count} ）")
+    print(f"Found {len(all_files)} JSON files: {len(files)} numeric input files, skipped {skipped_count} non-numeric files.")
     if max_reference:
-        print(f"⚙️  Max Reference (k): {max_reference}")
+        print(f"Max reference (k): {max_reference}")
     if n_groups > 1:
-        print(f"⚙️  N Groups (Sampling): {n_groups}")
+        print(f"Sampling groups: {n_groups}")
     if tokenizer_path:
-        print(f"⚙️  Tokenizer: {tokenizer_path} (Limit: {_global_token_limit})")
-    print(f"⚙️  Timeout per rollout: {timeout_per_rollout}s")
+        print(f"Tokenizer: {tokenizer_path} (token limit: {_global_token_limit})")
+    print(f"Timeout per rollout: {timeout_per_rollout}s")
 
     # ================================================================
-    # ：， rollout 
+    # Phase 1: read result files and collect rollout-grading tasks.
     # ================================================================
-    print("\n📖 1: ...")
+    print("\nPhase 1: reading prediction files...")
     
     sample_data = {}  # sample_idx -> {'ground_truth': str, 'num_rollouts': int}
     all_tasks = []    # [(sample_idx, rollout_idx, raw_text, ground_truth), ...]
@@ -230,7 +230,7 @@ def load_and_calculate(data_dir: str, tokenizer_path: str, n_groups: int, max_re
                 data = json.load(f)
             
             ground_truth = data.get('answer')
-            if not ground_truth:
+            if ground_truth is None or str(ground_truth).strip() == "":
                 continue
             
             raw_completions = data.get('completions', [])
@@ -247,32 +247,32 @@ def load_and_calculate(data_dir: str, tokenizer_path: str, n_groups: int, max_re
                 all_tasks.append((sample_idx, rollout_idx, raw_text, ground_truth))
                 
         except Exception as e:
-            print(f"\n⚠️ Error reading {file_path.name}: {e}")
+            print(f"\nWarning: failed to read {file_path.name}: {e}")
             continue
     
-    print(f"✅  {len(sample_data)}  samples，{len(all_tasks)}  rollouts")
+    print(f"Loaded {len(sample_data)} samples and {len(all_tasks)} rollouts.")
     
     if not all_tasks:
-        print("❌  rollouts")
+        print("Error: no valid rollouts found.")
         return {}
     
     # ================================================================
-    # ： rollouts，
+    # Phase 2: parse and grade all rollouts in parallel.
     # ================================================================
-    print("\n🔄 2:  rollouts（ + ）...")
+    print("\nPhase 2: extracting and grading rollout answers...")
     
     num_workers = max(1, multiprocessing.cpu_count())
     
-    # : sample_idx -> [(extracted_answer, is_correct), ...]
+    # sample index -> [(extracted_answer, is_correct), ...]
     sample_results = {idx: [None] * info['num_rollouts'] for idx, info in sample_data.items()}
     
-    # ， worker （）
-    batch_size = max(1, len(all_tasks) // (num_workers * 4))  #  worker 
+    # Group tasks to keep process-pool scheduling overhead bounded.
+    batch_size = max(1, len(all_tasks) // (num_workers * 4))  # About four batches per worker.
     batches = []
     for i in range(0, len(all_tasks), batch_size):
         batches.append(all_tasks[i:i + batch_size])
     
-    print(f"📦  {len(batches)} ， {batch_size}  rollouts")
+    print(f"Created {len(batches)} batches with up to {batch_size} rollouts each.")
     
     processed_count = 0
     error_count = 0
@@ -282,13 +282,13 @@ def load_and_calculate(data_dir: str, tokenizer_path: str, n_groups: int, max_re
         initializer=init_worker,
         initargs=(tokenizer_path, timeout_per_rollout)
     ) as executor:
-        # 
+        # Submit each rollout batch.
         future_to_batch = {
             executor.submit(process_rollout_batch, batch): batch 
             for batch in batches
         }
         
-        # 
+        # Collect completed batches.
         with tqdm(total=len(all_tasks), desc="Processing rollouts", unit="rollout") as pbar:
             for future in as_completed(future_to_batch):
                 try:
@@ -299,19 +299,19 @@ def load_and_calculate(data_dir: str, tokenizer_path: str, n_groups: int, max_re
                     pbar.update(len(batch_results))
                 except Exception as e:
                     batch = future_to_batch[future]
-                    # ，
+                    # Mark every rollout in a failed batch as incorrect.
                     for task in batch:
                         sample_idx, rollout_idx = task[0], task[1]
                         sample_results[sample_idx][rollout_idx] = ("[ERROR]", False)
                         error_count += 1
                     pbar.update(len(batch))
     
-    print(f"✅ ！: {processed_count}, : {error_count}")
+    print(f"Rollout processing complete: {processed_count} processed, {error_count} errors.")
     
     # ================================================================
-    # ： sample， majority voting
+    # Phase 3: compute answer-vote accuracy for each problem.
     # ================================================================
-    print(f"\n📊 3:  Majority Voting（n_groups={n_groups}）...")
+    print(f"\nPhase 3: computing majority votes (n_groups={n_groups})...")
     
     invalid_markers = {"[INVALID_NULL]", "[INVALID_PARSE]", "[INVALID_LENGTH]", "[INVALID_TOKENIZER]", "[TIMEOUT]", "[ERROR]", "wa", "unfinished"}
     
@@ -320,24 +320,24 @@ def load_and_calculate(data_dir: str, tokenizer_path: str, n_groups: int, max_re
     for sample_idx in tqdm(sorted(sample_results.keys()), desc="Computing SC", unit="sample"):
         rollout_data = sample_results[sample_idx]
         
-        #  None（）
+        # Drop slots that never received a worker result.
         rollout_data = [r for r in rollout_data if r is not None]
         
         if not rollout_data:
             continue
         
-        # 
+        # Preserve rollout order for deterministic tie handling under a fixed seed.
         extracted_answers = [r[0] for r in rollout_data]
         correctness_map = {r[0]: r[1] for r in rollout_data}  # answer -> is_correct
         
         null_count = sum(1 for ans in extracted_answers if ans in invalid_markers)
         total_processed = len(extracted_answers)
         
-        #  majority voting
+        # Limit the number of answers sampled for each vote.
         actual_k = max_reference if max_reference is not None else len(extracted_answers)
         
         if n_groups <= 1:
-            # 
+            # Evaluate one sampled group.
             if len(extracted_answers) >= actual_k:
                 sample_answers = random.sample(extracted_answers, actual_k)
             else:
@@ -352,7 +352,7 @@ def load_and_calculate(data_dir: str, tokenizer_path: str, n_groups: int, max_re
             
             avg_acc = 1.0 if is_correct else 0.0
         else:
-            # 
+            # Average correctness over repeated sampled groups.
             correct_count = 0
             
             for _ in range(n_groups):
@@ -385,7 +385,7 @@ def load_and_calculate(data_dir: str, tokenizer_path: str, n_groups: int, max_re
     return results
 
 def aggregate_metrics(results: Dict[int, Dict]) -> Dict:
-    """"""
+    """Aggregate per-problem SC results into dataset-level metrics."""
     problem_stats = []
     total_acc_sum = 0.0
     total_null_text = 0
@@ -421,26 +421,36 @@ def aggregate_metrics(results: Dict[int, Dict]) -> Dict:
 
 def print_results(metrics: Dict):
     if metrics['total_problems'] == 0:
-        print("⚠️ 。")
+        print("Warning: no valid results were generated.")
         return
 
     print("\n" + "="*60)
-    print("📊 Self-Consistency (Majority Vote) ")
+    print("Self-Consistency (Majority Vote)")
     print("="*60)
-    print(f": {metrics['total_problems']}")
+    print(f"Total problems: {metrics['total_problems']}")
     print(f"SC Accuracy (Pass@1): {metrics['pass_at_k']['pass@1']:.2%}")
     print("="*60 + "\n")
 
 def main():
-    parser = argparse.ArgumentParser(description=" Self-Consistency Accuracy")
-    parser.add_argument('--verification_dir', type=str, required=True, help=' completions  JSON ')
-    parser.add_argument('--output_file', type=str, default=None, help=' ()')
-    parser.add_argument('--max_reference', type=int, default=None, help=' completion ')
-    parser.add_argument('--tokenizer_path', type=str, default='/path/to/model', help='Tokenizer ')
-    parser.add_argument('--n_groups', type=int, default=10000, help=' ()')
-    parser.add_argument('--timeout', type=int, default=600, help=' rollout （）')
+    parser = argparse.ArgumentParser(description="Calculate self-consistency accuracy")
+    parser.add_argument('--verification_dir', type=str, required=True, help='Directory containing completion JSON files')
+    parser.add_argument('--output_file', type=str, default=None, help='Optional path for the JSON report')
+    parser.add_argument('--max_reference', type=int, default=None, help='Maximum completions sampled per problem')
+    parser.add_argument('--tokenizer_path', type=str, default='', help='Optional tokenizer path; omit to disable token-length checks')
+    parser.add_argument('--n_groups', type=int, default=10000, help='Number of repeated sampling groups')
+    parser.add_argument('--timeout', type=int, default=600, help='Timeout in seconds for grading each rollout')
+    parser.add_argument('--seed', type=int, default=0, help='Random seed for completion subsampling (default: 0)')
 
     args = parser.parse_args()
+    if not Path(args.verification_dir).is_dir():
+        parser.error("--verification_dir must be an existing directory")
+    if args.max_reference is not None and args.max_reference <= 0:
+        parser.error("--max_reference must be a positive integer")
+    if args.n_groups <= 0:
+        parser.error("--n_groups must be a positive integer")
+    if args.timeout <= 0:
+        parser.error("--timeout must be a positive integer")
+    random.seed(args.seed)
     
     results = load_and_calculate(
         args.verification_dir, 
@@ -457,11 +467,12 @@ def main():
     
     if args.output_file:
         try:
+            Path(args.output_file).parent.mkdir(parents=True, exist_ok=True)
             with open(args.output_file, 'w', encoding='utf-8') as f:
                 json.dump(metrics, f, indent=2, ensure_ascii=False)
-            print(f"💾 : {args.output_file}")
+            print(f"Results saved to: {args.output_file}")
         except Exception as e:
-            print(f"❌ : {e}")
+            print(f"Error: failed to save results: {e}")
         
         if HAS_PANDAS:
             try:
@@ -491,12 +502,12 @@ def main():
                 df.loc[len(df)] = summary_row
                 
                 df.to_excel(excel_file, index=False, engine='openpyxl')
-                print(f"💾 Excel: {excel_file}")
+                print(f"Excel report saved to: {excel_file}")
                 
             except Exception as e:
-                print(f"❌ Excel: {e}")
+                print(f"Error: failed to save Excel report: {e}")
     else:
-        print("ℹ️  ，")
+        print("No output file specified; results were printed only.")
 
 if __name__ == "__main__":
     main()

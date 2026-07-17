@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Calculate FLOPs for CPT_math.py outputs.
+Calculate Qwen/Qwen3 FLOPs for CPT math inference outputs.
 
-The script reads the *_bb.json files produced by CPT_math.py, aggregates the
+The script reads the *_bb.json files produced by the CPT math entry points, aggregates the
 saved flops_trace_summary buckets, and applies the same vectorized Qwen3 FLOPs
 formula used by calculate_pipeline_flops.py.
+
+This implementation is specific to Qwen-family model configurations and must
+not be used for GPT-OSS or unrelated model architectures.
 """
 
 import argparse
@@ -532,7 +535,9 @@ def build_json_report(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Calculate CPT_math.py FLOPs from *_bb.json traces.")
+    parser = argparse.ArgumentParser(
+        description="Calculate Qwen/Qwen3 CPT math FLOPs from *_bb.json traces."
+    )
     parser.add_argument("--bb-dir", required=True, help="*_bb.json directory, run root, or output dir.")
     parser.add_argument("--config", default=None, help="Path to HuggingFace config.json.")
     parser.add_argument(

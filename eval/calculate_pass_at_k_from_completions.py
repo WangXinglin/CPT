@@ -3,7 +3,7 @@
 Pass@k Calculation Script (with Token Length Filtering + 60s Timeout Mechanism)
 Features:
 1. Reads JSON files from a specified directory (containing completions and answer).
-2. (New) If max_reference is specified, loads Tokenizer to filter out responses with length > 8000 tokens and keeps the top max_reference.
+2. (New) If max_reference is specified, loads Tokenizer to filter out responses with length > 320000 tokens and keeps the top max_reference.
 3. Extracts \boxed{} content from completions.
 4. Compares with ground truth to determine correctness.
 5. Calculates and outputs Pass@k metrics.
@@ -43,7 +43,7 @@ except ImportError:
 # ================= Global Variables for Workers =================
 _global_tokenizer = None
 _global_max_ref = None
-_global_token_limit = 320000
+_global_token_limit = 60000
 
 def init_worker(tokenizer_path: str, max_reference: int):
     """
@@ -53,8 +53,10 @@ def init_worker(tokenizer_path: str, max_reference: int):
     _global_max_ref = max_reference
     
     if max_reference is not None:
+        if not tokenizer_path:
+            return
         if not HAS_TRANSFORMERS:
-            print("⚠️ Warning: transformers not installed, cannot perform Token filtering, max_reference will be ignored")
+            print("Warning: transformers is not installed; token-length filtering is disabled, but the max_reference count limit still applies.")
             return
 
         try:
@@ -129,7 +131,7 @@ def process_file(file_path: Path) -> Optional[Tuple[int, Dict]]:
                 return None
 
         ground_truth = data.get('answer')
-        if not ground_truth:
+        if ground_truth is None or str(ground_truth).strip() == "":
             return None
 
         raw_completions = data.get('completions', [])
@@ -154,6 +156,8 @@ def process_file(file_path: Path) -> Optional[Tuple[int, Dict]]:
                     continue
             
             final_completions = valid_candidates[:_global_max_ref]
+        elif _global_max_ref is not None:
+            final_completions = raw_completions[:_global_max_ref]
         else:
             final_completions = raw_completions[:128]
 
@@ -187,15 +191,17 @@ def process_file(file_path: Path) -> Optional[Tuple[int, Dict]]:
 
 def load_and_verify_data(data_dir: str, tokenizer_path: str, max_reference: int) -> Dict[int, Dict]:
     path = Path(data_dir)
-    files = sorted([f for f in path.glob("*.json") if not f.name.startswith('.')])
+    files = sorted([f for f in path.glob("*.json") if not f.name.startswith('.') and f.stem.isdigit()])
     
     if not files:
         print(f"❌ No JSON files found in {data_dir}")
         return {}
 
     print(f"📂 Found {len(files)} files, starting processing...")
-    if max_reference is not None:
-        print(f"⚙️  Filtering mode enabled: Max Ref={max_reference}, Token Limit=8000, Tokenizer={tokenizer_path}")
+    if max_reference is not None and tokenizer_path:
+        print(f"⚙️  Filtering mode enabled: Max Ref={max_reference}, Token Limit=320000, Tokenizer={tokenizer_path}")
+    elif max_reference is not None:
+        print(f"Count limit enabled: Max Ref={max_reference}; token-length filtering is disabled.")
     
     results = {}
     # Slightly reduce worker count to prevent machine overload and freezing
@@ -314,16 +320,22 @@ def main():
     parser.add_argument('--verification_dir', type=str, required=True, help='Directory containing JSON files with completions')
     parser.add_argument('--k_values', type=str, default='1,8,16,32,64,128', help='List of k values, comma separated')
     parser.add_argument('--output_file', type=str, default=None, help='Result output file path (optional)')
-    parser.add_argument('--max_reference', type=int, default=None, help='Maximum number of completions to keep (if set, filters responses >8000 tokens)')
+    parser.add_argument('--max_reference', type=int, default=None, help='Maximum number of completions to keep (if set, filters responses >320000 tokens)')
     parser.add_argument('--tokenizer_path', type=str, default='', help='Tokenizer path')
     
     args = parser.parse_args()
+    if not Path(args.verification_dir).is_dir():
+        parser.error("--verification_dir must be an existing directory")
     
     try:
         k_list = [int(x.strip()) for x in args.k_values.split(',')]
     except ValueError:
         print("❌ k_values format error, should be comma-separated integers")
         return
+    if not k_list or any(k <= 0 for k in k_list):
+        parser.error("--k_values must contain only positive integers")
+    if args.max_reference is not None and args.max_reference <= 0:
+        parser.error("--max_reference must be a positive integer")
 
     results = load_and_verify_data(args.verification_dir, args.tokenizer_path, args.max_reference)
     if not results:
@@ -334,6 +346,7 @@ def main():
     
     if args.output_file:
         try:
+            Path(args.output_file).parent.mkdir(parents=True, exist_ok=True)
             with open(args.output_file, 'w', encoding='utf-8') as f:
                 json.dump(metrics, f, indent=2, ensure_ascii=False)
             print(f"💾 Complete results saved to: {args.output_file}")

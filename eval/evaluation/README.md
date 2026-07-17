@@ -1,12 +1,15 @@
 ### Requirements
-You can install the required packages with the following command:
+From the repository root, enter this directory before running the commands below.
+Use a separate environment from CPT and the baselines: this harness pins vLLM
+0.5.1 and Transformers 4.42.3. Install the requirements and those pins in one
+resolver run:
+
 ```bash
-cd latex2sympy
-pip install -e .
-cd ..
-pip install -r requirements.txt 
-pip install vllm==0.5.1 --no-build-isolation
-pip install transformers==4.42.3
+cd eval/evaluation
+pip install --no-build-isolation \
+  -r requirements.txt \
+  vllm==0.5.1 \
+  transformers==4.42.3
 ```
 
 ### Evaluation

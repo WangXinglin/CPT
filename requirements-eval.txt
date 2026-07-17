@@ -1,0 +1,15 @@
+# Dependencies for eval/calculate_*_from_completions.py and eval/run_eval.sh.
+# Install this alongside one of the model-specific root requirements files.
+numpy
+scipy
+sympy==1.12
+antlr4-python3-runtime==4.11.1
+latex2sympy2
+word2number
+regex
+tqdm
+transformers
+
+# Optional Excel output:
+# pandas
+# openpyxl

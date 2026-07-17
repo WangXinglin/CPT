@@ -1,4 +1,5 @@
 from grader import math_equal
+import argparse
 from parser import strip_string
 import timeout_decorator
 from collections import defaultdict, Counter
@@ -91,9 +92,22 @@ def eval_maj_k_metrics(data_path, k=8):
 
 
 if __name__ == "__main__":
-    data_path = "./data/eval_rm_maj_example/math_cot_100.jsonl"
+    cli = argparse.ArgumentParser(
+        description="Evaluate majority-vote and reward-model selection metrics."
+    )
+    cli.add_argument("data_path", help="Input JSONL containing pred and score fields.")
+    cli.add_argument(
+        "--candidate",
+        type=int,
+        default=8,
+        help="Number of candidates per example (default: 8).",
+    )
+    args = cli.parse_args()
+    if args.candidate <= 0:
+        cli.error("--candidate must be a positive integer")
 
-    candidate = 8
+    candidate = args.candidate
+    data_path = args.data_path
     all_result = {}
     all_result[f'maj@{candidate}'] = eval_maj_k_metrics(data_path, k=candidate)
     all_result[f'rm@{candidate}'] = eval_rm_k_metrics(data_path, k=candidate)

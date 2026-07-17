@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# LeaP with GPT-OSS
+vllm==0.17.0

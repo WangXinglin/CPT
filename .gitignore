@@ -10,11 +10,21 @@ dist/
 venv/
 env/
 .conda/
+.env
+.env.*
+!.env.example
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 
 # Experiment outputs and logs
 outputs/
 output/
 logs/
+wandb/
 *.log
 *.out
 *.err
@@ -27,7 +37,7 @@ logs/
 *.safetensors
 *.ckpt
 checkpoints/
-models/
+/models/
 
 # Editor and OS files
 .DS_Store

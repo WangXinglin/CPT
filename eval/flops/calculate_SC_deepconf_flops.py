@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Calculate total FLOPs for SC_latency.py and df_sample.py output folders.
+Calculate total Qwen/Qwen3 FLOPs for Math SC and DeepConf output folders.
 
 The two samplers both save one JSON file per question with a completions list.
 Each completion stores the generated token count in "tokens". Prompt token
 counts are not saved, so this script rebuilds the same chat prompt and counts
 it with the model tokenizer before applying the shared CPT FLOPs formula.
+The stored schema does not preserve task-specific GPQA choices or code prompts,
+so this script must not be used for GPQA or code results.
+The FLOPs formula is Qwen-family-specific and must not be used for GPT-OSS or
+unrelated model architectures.
 """
 
 import argparse
@@ -18,9 +22,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-CPT_EVAL_DIR = Path(__file__).resolve().parents[2] / "CPT" / "eval"
-if str(CPT_EVAL_DIR) not in sys.path:
-    sys.path.insert(0, str(CPT_EVAL_DIR))
+FLOPS_DIR = Path(__file__).resolve().parent
+if str(FLOPS_DIR) not in sys.path:
+    sys.path.insert(0, str(FLOPS_DIR))
 
 from calculate_cpt_math_flops import (
     bucket_to_report,
@@ -740,7 +744,9 @@ def read_system_prompt(args: argparse.Namespace) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Calculate total FLOPs for SC_latency.py / df_sample.py result JSON files."
+        description=(
+            "Calculate Qwen/Qwen3 FLOPs for Math SC and DeepConf result JSON files."
+        )
     )
     parser.add_argument("results_dirs", nargs="*", help="One or more result dirs/files, e.g. SC df.")
     parser.add_argument(

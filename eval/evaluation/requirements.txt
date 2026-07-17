@@ -6,10 +6,16 @@ torch
 transformers
 python_dateutil
 flash_attn
+numpy
+regex
+multiprocess
+mpmath
+pandas
 
 # math_eval
 sympy==1.12
 antlr4-python3-runtime==4.11.1 # ! The version needs to be compatible with sympy.
+latex2sympy2
 word2number
 Pebble
 timeout-decorator

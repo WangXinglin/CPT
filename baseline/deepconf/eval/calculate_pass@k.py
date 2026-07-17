@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
 """
-Pass@k  ( Token  + 60s )
-：
-1.  JSON  ( completions  answer)。
-2. ()  max_reference， Tokenizer  > 8000 ， max_reference 。
-3.  completions  \\boxed{} 。
-4. ，。
-5.  Pass@k 。
-6. ()  60s 。
-7.  early_stopped=True， warm-up  early_stopped=False 。
+Evaluate DeepConf math outputs with pass@k and majority-vote metrics.
+
+When ``max_reference`` is set, completions longer than 40,000 tokenizer
+tokens are counted as incorrect before the reference cap is applied. Each
+input file has a 600-second worker timeout. Completions marked
+``early_stopped=True`` are excluded; warm-up completions are retained.
 """
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import json
+import sys
 import argparse
 import multiprocessing
 import re
-import signal  # ：
+import signal
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
 from tqdm import tqdm
 from scipy.special import comb
+
+# Reuse the repository's shared math parser and grader regardless of the
+# caller's current working directory.
+_REPO_EVAL_DIR = Path(__file__).resolve().parents[3] / "eval"
+sys.path.insert(0, str(_REPO_EVAL_DIR))
 
 from sal.utils.math import extract_answer
 from evaluation.grader import math_equal
@@ -46,16 +49,16 @@ _global_tokenizer = None
 _global_max_ref = None
 _global_token_limit = 40000
 
-def init_worker(tokenizer_path: str, max_reference: int):
-    """
-    ： worker  tokenizer
-    """
+def init_worker(tokenizer_path: str, max_reference: Optional[int]):
+    """Initialize the optional tokenizer used by each worker process."""
     global _global_tokenizer, _global_max_ref
     _global_max_ref = max_reference
     
     if max_reference is not None:
+        if not tokenizer_path:
+            return
         if not HAS_TRANSFORMERS:
-            print("⚠️ :  transformers， Token ， max_reference")
+            print("Warning: transformers is unavailable; applying max_reference without token filtering.")
             return
 
         try:
@@ -64,12 +67,11 @@ def init_worker(tokenizer_path: str, max_reference: int):
                 trust_remote_code=True
             )
         except Exception as e:
-            print(f"❌ Worker  Tokenizer : {e}")
+            print(f"Warning: tokenizer loading failed; applying max_reference without token filtering: {e}")
             _global_tokenizer = None
 
 # ================= Logic Functions =================
 
-# ：
 def timeout_handler(signum, frame):
     raise TimeoutError("Processing timed out")
 
@@ -89,7 +91,7 @@ def calculate_pass_at_k(n: int, c: int, k: int) -> float:
             return 0.0
 
 def check_answer(text: str, ground_truth: str, data_name: str = "math") -> bool:
-    # ， extract_answer 
+    # Use the repository-shared answer extractor before grading.
     try:
         pred_ans = extract_answer(text, data_name)
     except Exception:
@@ -102,41 +104,31 @@ def check_answer(text: str, ground_truth: str, data_name: str = "math") -> bool:
     return is_correct
 
 def keep_for_pass_at_k(comp) -> bool:
-    """ warm-up  early stop  completion。"""
+    """Keep warm-up completions and exclude confidence-stopped completions."""
     if not isinstance(comp, dict):
         return True
     return comp.get('early_stopped') is not True
 
 def process_file(file_path: Path) -> Optional[Tuple[int, Dict]]:
-    """
-    ：、()、、
-     60s 
-    """
-    # =================  =================
-    #  Unix/Linux ，Windows  signal.SIGALRM 
+    """Load, filter, grade, and summarize one result file."""
+    # SIGALRM is available on Unix-like systems but not on Windows.
     if hasattr(signal, "SIGALRM"):
         signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(600)  #  60 
-    # ===============================================
+        signal.alarm(600)
 
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        #  index
         index = data.get('index')
         if index is None:
-            try:
-                stem = file_path.stem
-                if stem.startswith('verification_'):
-                    index = int(stem.split('_')[1])
-                else:
-                    index = int(stem)
-            except ValueError:
+            match = re.fullmatch(r'(?:verification_)?(\d+)', file_path.stem)
+            if match is None:
                 return None
+            index = int(match.group(1))
 
         ground_truth = data.get('answer')
-        if not ground_truth:
+        if ground_truth is None or str(ground_truth).strip() == "":
             return None
 
         raw_completions = data.get('completions', [])
@@ -148,22 +140,25 @@ def process_file(file_path: Path) -> Optional[Tuple[int, Dict]]:
         
         final_completions = []
         
-        if _global_max_ref is not None and _global_tokenizer is not None:
-            valid_candidates = []
-            for comp in filtered_completions:
-                raw_text = comp.get('text') if isinstance(comp, dict) else comp
-                text_str = str(raw_text) if raw_text is not None else ""
+        if _global_max_ref is not None:
+            if _global_tokenizer is not None:
+                valid_candidates = []
+                for comp in filtered_completions:
+                    raw_text = comp.get('text') if isinstance(comp, dict) else comp
+                    text_str = str(raw_text) if raw_text is not None else ""
+
+                    try:
+                        token_ids = _global_tokenizer.encode(text_str)
+                        if len(token_ids) <= _global_token_limit:
+                            valid_candidates.append(comp)
+                        else:
+                            valid_candidates.append({"text": "wa"})
+                    except Exception:
+                        continue
                 
-                try:
-                    token_ids = _global_tokenizer.encode(text_str)
-                    if len(token_ids) <= _global_token_limit:
-                        valid_candidates.append(comp)
-                    else:
-                        valid_candidates.append({"text": "wa"})
-                except Exception:
-                    continue
-            
-            final_completions = valid_candidates[:_global_max_ref]
+                final_completions = valid_candidates[:_global_max_ref]
+            else:
+                final_completions = filtered_completions[:_global_max_ref]
         else:
             final_completions = filtered_completions[:512]
 
@@ -184,34 +179,45 @@ def process_file(file_path: Path) -> Optional[Tuple[int, Dict]]:
         return (int(index), {'verification_details': verification_details})
     
     except TimeoutError:
-        # 
-        # print(f"⏰  (60s): {file_path.name}") # ：
-        return None  #  None 
+        return None
     except Exception:
         return None
     finally:
-        # =================  =================
         if hasattr(signal, "SIGALRM"):
-            signal.alarm(0)  # ，
-        # ===============================================
+            signal.alarm(0)
 
-def load_and_verify_data(data_dir: str, tokenizer_path: str, max_reference: int) -> Dict[int, Dict]:
+def load_and_verify_data(
+    data_dir: str,
+    tokenizer_path: str,
+    max_reference: Optional[int],
+) -> Dict[int, Dict]:
     path = Path(data_dir)
-    files = sorted([f for f in path.glob("*.json") if not f.name.startswith('.')])
-    
-    if not files:
-        print(f"❌  {data_dir}  JSON ")
+    if not path.is_dir():
+        print(f"Error: verification directory does not exist or is not a directory: {data_dir}")
         return {}
 
-    print(f"📂  {len(files)} ，...")
-    if max_reference is not None:
-        print(f"⚙️  : Max Ref={max_reference}, Token Limit=8000, Tokenizer={tokenizer_path}")
+    files = sorted(
+        f for f in path.glob("*.json")
+        if re.fullmatch(r'(?:verification_)?\d+', f.stem)
+    )
+    
+    if not files:
+        print(f"No eligible JSON files found in {data_dir}.")
+        return {}
+
+    print(f"Found {len(files)} eligible JSON files. Verifying...")
+    if max_reference is not None and tokenizer_path:
+        print(
+            f"Reference cap: {max_reference}; token limit: {_global_token_limit}; "
+            f"tokenizer: {tokenizer_path}"
+        )
+    elif max_reference is not None:
+        print(f"Reference cap: {max_reference}; token-length filtering is disabled.")
     
     results = {}
-    #  worker ，
     num_workers = max(1, min(multiprocessing.cpu_count() - 1, len(files)))
     
-    print(f"🚀  {num_workers}  Worker ...")
+    print(f"Starting {num_workers} worker processes...")
 
     with ProcessPoolExecutor(
         max_workers=num_workers, 
@@ -224,25 +230,20 @@ def load_and_verify_data(data_dir: str, tokenizer_path: str, max_reference: int)
             for future in as_completed(future_to_file):
                 file_path = future_to_file[future]
                 try:
-                    # ： timeout ， worker  signal 
-                    #  worker  signal ，future  None
-                    result = future.result(timeout=65) 
+                    result = future.result(timeout=600)
                     
                     if result is not None:
                         index, data = result
                         results[index] = data
-                    else:
-                        #  None， worker 
-                        pass 
 
                 except TimeoutError:
-                    print(f"⚠️ : {file_path.name}")
+                    print(f"Warning: processing timed out after 600 seconds: {file_path.name}")
                 except Exception as e:
-                    print(f"❌  {file_path.name}: {e}")
+                    print(f"Error processing {file_path.name}: {e}")
                 
                 pbar.update(1)
     
-    print(f"✅  {len(results)}  ()")
+    print(f"Verified {len(results)} files successfully.")
     return results
 
 def calculate_metrics(results: Dict[int, Dict], k_values: List[int]) -> Dict:
@@ -294,25 +295,25 @@ def calculate_metrics(results: Dict[int, Dict], k_values: List[int]) -> Dict:
 
 def print_results(metrics: Dict):
     if metrics['total_problems'] == 0:
-        print("⚠️ 。")
+        print("No valid verification results.")
         return
 
-    print("\n" + "="*60)
-    print("📊 Pass@k ")
-    print("="*60)
-    print(f": {metrics['total_problems']}")
-    print(f"TextNull: {metrics['total_null_text']}")
-    print(f"Majority Vote Accuracy (Pass@1 > 0.5): {metrics['majority_vote_accuracy']:.2%}")
+    print("\n" + "=" * 60)
+    print("Pass@k evaluation results")
+    print("=" * 60)
+    print(f"Problems: {metrics['total_problems']}")
+    print(f"Null completions: {metrics['total_null_text']}")
+    print(f"Majority-vote accuracy: {metrics['majority_vote_accuracy']:.2%}")
     
     print("-" * 60)
-    print(" Pass@k:")
+    print("Average pass@k:")
     sorted_keys = sorted(metrics['pass_at_k'].keys(), key=lambda x: int(x.split('@')[1]))
     for k in sorted_keys:
         v = metrics['pass_at_k'][k]
         print(f"  {k:10s}: {v:.2%}")
     
     print("-" * 60)
-    print(" Pass@k ( 10 ):")
+    print("Per-problem pass@k (first 10):")
     for stat in metrics['problem_stats'][:10]:
         print(f"  Problem {stat['index']}: Correct {stat['correct']}/{stat['total']} (Null: {stat['null_text']})")
         p_keys = sorted(stat['pass_at_k'].keys(), key=lambda x: int(x.split('@')[1]))
@@ -321,26 +322,70 @@ def print_results(metrics: Dict):
             print(f"    {p_str}")
     
     if len(metrics['problem_stats']) > 10:
-        print(f"  ... ( {len(metrics['problem_stats']) - 10} )")
-    print("="*60 + "\n")
+        print(f"  ... {len(metrics['problem_stats']) - 10} more problems")
+    print("=" * 60 + "\n")
 
 def main():
-    parser = argparse.ArgumentParser(description=" Pass@k ( boxed )")
-    parser.add_argument('--verification_dir', type=str, required=True, help=' completions  JSON ')
-    parser.add_argument('--k_values', type=str, default='1', help='k，')
-    parser.add_argument('--output_file', type=str, default=None, help=' ()')
-    parser.add_argument('--max_reference', type=int, default=None, help=' completion  (， >8000 token )')
-    parser.add_argument('--tokenizer_path', type=str, default='/path/to/model', help='Tokenizer ')
+    parser = argparse.ArgumentParser(
+        description="Evaluate DeepConf math completions with pass@k and majority-vote metrics."
+    )
+    parser.add_argument(
+        '--verification_dir',
+        type=str,
+        required=True,
+        help='Directory containing numeric JSON files or verification_<N>.json files.',
+    )
+    parser.add_argument(
+        '--k_values',
+        type=str,
+        default='1',
+        help='Comma-separated positive k values (default: 1).',
+    )
+    parser.add_argument(
+        '--output_file',
+        type=str,
+        default=None,
+        help='Optional path for the JSON metrics output.',
+    )
+    parser.add_argument(
+        '--max_reference',
+        type=int,
+        default=None,
+        help=(
+            'Optional positive completion cap. With a tokenizer, completions over '
+            '40,000 tokens are counted as incorrect before applying the cap.'
+        ),
+    )
+    parser.add_argument(
+        '--tokenizer_path',
+        type=str,
+        default='',
+        help='Optional tokenizer path used for the 40,000-token limit.',
+    )
     
     args = parser.parse_args()
-    
+
+    verification_path = Path(args.verification_dir)
+    if not verification_path.is_dir():
+        parser.error(
+            f"verification_dir does not exist or is not a directory: {args.verification_dir}"
+        )
+
     try:
         k_list = [int(x.strip()) for x in args.k_values.split(',')]
     except ValueError:
-        print("❌ k_values ，")
-        return
+        parser.error("k_values must be a comma-separated list of positive integers.")
+    if not k_list or any(k <= 0 for k in k_list):
+        parser.error("every k value must be greater than zero.")
 
-    results = load_and_verify_data(args.verification_dir, args.tokenizer_path, args.max_reference)
+    if args.max_reference is not None and args.max_reference <= 0:
+        parser.error("max_reference must be greater than zero when provided.")
+
+    results = load_and_verify_data(
+        args.verification_dir,
+        args.tokenizer_path,
+        args.max_reference,
+    )
     if not results:
         return
 
@@ -348,16 +393,18 @@ def main():
     print_results(metrics)
     
     if args.output_file:
+        output_path = Path(args.output_file)
         try:
-            with open(args.output_file, 'w', encoding='utf-8') as f:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(metrics, f, indent=2, ensure_ascii=False)
-            print(f"💾 : {args.output_file}")
+            print(f"Saved JSON metrics to: {output_path}")
         except Exception as e:
-            print(f"❌ : {e}")
+            print(f"Failed to save JSON metrics: {e}")
         
         if HAS_PANDAS:
             try:
-                excel_file = Path(args.output_file).with_suffix('.xlsx')
+                excel_file = output_path.with_suffix('.xlsx')
                 excel_data = []
                 for stat in metrics['problem_stats']:
                     row = {
@@ -385,12 +432,12 @@ def main():
                 df.loc[len(df)] = summary_row
                 
                 df.to_excel(excel_file, index=False, engine='openpyxl')
-                print(f"💾 Excel: {excel_file}")
+                print(f"Saved Excel metrics to: {excel_file}")
                 
             except Exception as e:
-                print(f"❌ Excel: {e}")
+                print(f"Failed to save Excel metrics: {e}")
     else:
-        print("ℹ️  ，")
+        print("No output file requested; metrics were printed only.")
 
 if __name__ == "__main__":
     main()
